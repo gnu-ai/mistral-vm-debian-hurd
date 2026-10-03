@@ -82,8 +82,10 @@ TIMEOUT_SCRIPT = 3600     # seconds for the whole guest script
 # concurrently, each on its own copy (mind the RAM: 1 GB each).
 CI_IMAGE = os.environ.get("HURD_VM_CI_IMAGE",
                           os.path.join(HERE, "debian-hurd-ci.img"))
-SERIAL_LOG = os.path.join(HERE, "serial.log")
-QEMU_LOG = os.path.join(HERE, "qemu.log")
+SERIAL_LOG = os.environ.get("HURD_VM_SERIAL_LOG",
+                            os.path.join(HERE, "serial.log"))
+QEMU_LOG = os.environ.get("HURD_VM_QEMU_LOG",
+                          os.path.join(HERE, "qemu.log"))
 
 # ------------------------------------------------------------------
 # Small host-tool helpers.
