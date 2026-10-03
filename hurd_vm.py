@@ -327,10 +327,13 @@ class SerialVM:
     def _base_cmd(self, accel):
         # Boot the disk itself: the image's own GRUB, with the
         # patched grub.cfg, handles everything from there.
+        # The host port forwarded to the guest SSH is configurable:
+        # two concurrent VMs cannot share it (HURD_VM_SSH_PORT).
+        ssh_port = os.environ.get("HURD_VM_SSH_PORT", "2222")
         return [
             "qemu-system-x86_64", accel, "-m", self.memory, "-no-reboot",
             "-drive", f"file={self.disk},cache=writeback",
-            "-net", "user,hostfwd=tcp:127.0.0.1:2222-:22",
+            "-net", f"user,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
             "-net", "nic,model=e1000",
             "-display", "none",
             "-serial", f"tcp:127.0.0.1:{self.port},server,nowait",
