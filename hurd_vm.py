@@ -31,7 +31,9 @@ can reach the network.
 
 Requires on the host: qemu-system-x86 (KVM used when /dev/kvm is
 available), grub-mkimage with the i386-pc modules (Debian:
-grub-pc-bin + grub-common), python3.
+grub-pc-bin + grub-common), python3.  The guest is given 1 GB of
+RAM: on a memory-tight host a bigger allocation kills the guest
+silently before even SeaBIOS runs.
 """
 
 import os
@@ -157,7 +159,7 @@ class SerialVM:
     process dies - never swallow the reason again.
     """
 
-    def __init__(self, iso: str, disk: str, memory: str = "2G",
+    def __init__(self, iso: str, disk: str, memory: str = "1G",
                  allow_copy: bool = False):
         # pick a free ephemeral port: no conflict with a lingering VM
         probe = socket.socket()
