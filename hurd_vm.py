@@ -90,41 +90,74 @@ def build_boot_iso(workdir: str) -> str:
 
 
 class SerialVM:
-    """QEMU with the serial line on a local Telnet socket."""
+    """QEMU with the serial line on a local Telnet socket.
 
-    def __init__(self, iso: str, disk: str, port: int = 44555,
-                 memory: str = "2G"):
-        self.port = port
-        accel = "-enable-kvm" if os.path.exists("/dev/kvm") else "-accel tcg"
-        self.cmd = [
-            "qemu-system-x86_64", accel, "-m", memory, "-no-reboot",
-            "-cdrom", iso, "-boot", "d",
-            "-drive", f"file={disk},cache=writeback",
-            "-net", "user", "-net", "nic,model=e1000",
-            "-display", "none",
-            "-serial", f"telnet:127.0.0.1:{port},server,nowait",
-        ]
+    QEMU's stderr is captured in qemu.log and echoed whenever the
+    process dies - never swallow the reason again.
+    """
+
+    def __init__(self, iso: str, disk: str, memory: str = "2G"):
+        # pick a free ephemeral port: no conflict with a lingering VM
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        self.port = probe.getsockname()[1]
+        probe.close()
+        self.disk = disk
+        self.iso = iso
+        self.memory = memory
         self.proc = None
         self.log = b""
         self.sock = None
+        self.stderr_path = os.path.abspath("qemu.log")
+
+    def _base_cmd(self, accel):
+        return [
+            "qemu-system-x86_64", accel, "-m", self.memory, "-no-reboot",
+            "-cdrom", self.iso, "-boot", "d",
+            "-drive", f"file={self.disk},cache=writeback",
+            "-net", "user", "-net", "nic,model=e1000",
+            "-display", "none",
+            "-serial", f"telnet:127.0.0.1:{self.port},server,nowait",
+        ]
 
     def start(self):
-        self.proc = subprocess.Popen(self.cmd, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL)
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            try:
-                self.sock = socket.create_connection(
-                    ("127.0.0.1", self.port), timeout=5)
-                self.sock.settimeout(5)
-                # refuse the Telnet option negotiations QEMU proposes
-                self.sock.sendall(b"\xff\xfc\x01\xff\xfc\x03\xff\xfe\x00")
-                return
-            except OSError:
-                if self.proc.poll() is not None:
-                    raise RuntimeError("QEMU exited early")
-                time.sleep(0.5)
-        raise RuntimeError("serial port never came up")
+        accel = "-enable-kvm" if os.path.exists("/dev/kvm") else "-accel tcg"
+        with open(self.stderr_path, "wb") as errf:
+            self.proc = subprocess.Popen(self._base_cmd(accel),
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=errf)
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                try:
+                    self.sock = socket.create_connection(
+                        ("127.0.0.1", self.port), timeout=5)
+                    self.sock.settimeout(5)
+                    # refuse the Telnet option negotiations QEMU proposes
+                    self.sock.sendall(b"\xff\xfc\x01\xff\xfc\x03\xff\xfe\x00")
+                    return
+                except OSError:
+                    if self.proc.poll() is not None:
+                        reason = self._qemu_died()
+                        if (accel == "-enable-kvm"
+                                and ("kvm" in reason.lower()
+                                     or "could not access" in reason.lower())):
+                            print(f"[vm] KVM failed, falling back to TCG:\n{reason}")
+                            accel = "-accel tcg"
+                            errf.close()
+                            return self.start()
+                        raise RuntimeError("QEMU exited early:\n" + reason)
+                    time.sleep(0.5)
+            raise RuntimeError("serial port never came up:\n" + self._qemu_tail())
+
+    def _qemu_tail(self) -> str:
+        try:
+            with open(self.stderr_path, "rb") as f:
+                return f.read().decode("latin-1", "replace")[-2000:]
+        except OSError:
+            return "(no QEMU stderr captured)"
+
+    def _qemu_died(self) -> str:
+        return self._qemu_tail()
 
     def read_some(self, wait: float = 5.0) -> bytes:
         self.sock.settimeout(wait)
@@ -168,6 +201,9 @@ def main():
     disk = sys.argv[1]
     script = sys.argv[2] if len(sys.argv) > 2 else None
 
+    if not os.path.isfile(disk):
+        print(f"[vm] FAIL: no such image: {disk}")
+        return 2
     iso = build_boot_iso(os.getcwd())
     vm = SerialVM(iso, disk)
     vm.start()
