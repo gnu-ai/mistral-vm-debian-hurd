@@ -77,7 +77,11 @@ CONSOLE_ARG = "console=com0"     # serial kernel console (COM1)
 TIMEOUT_LOGIN = 900       # seconds until the login prompt
 TIMEOUT_SCRIPT = 3600     # seconds for the whole guest script
 
-CI_IMAGE = os.path.join(HERE, "debian-hurd-ci.img")   # prepared copy
+# Prepared copy of the image.  Set HURD_VM_CI_IMAGE to boot a
+# private one instead of the shared default — two drivers may run
+# concurrently, each on its own copy (mind the RAM: 1 GB each).
+CI_IMAGE = os.environ.get("HURD_VM_CI_IMAGE",
+                          os.path.join(HERE, "debian-hurd-ci.img"))
 SERIAL_LOG = os.path.join(HERE, "serial.log")
 QEMU_LOG = os.path.join(HERE, "qemu.log")
 
