@@ -21,9 +21,14 @@ line:
        └──── kernel, boot script and getty all on the serial port ──┘
 ```
 
-The driver logs in as **root** (the preinstalled images have no root
-password) over the serial TCP socket and can run any script inside
-the guest.
+The driver logs in as **root** with no password: that is its CI
+contract.  The older preinstalled images shipped an empty root
+password; the newer ones set one — so the CI copy (never the
+source image) gets root's password hash cleared in `/etc/shadow`
+at prepare time, exactly like the `console=com0` patch.  Custom
+images with a root password you want to keep can still pass
+`--root-pass PW`.  The login goes through the serial TCP socket,
+and any script can then run inside the guest.
 
 ## Files
 

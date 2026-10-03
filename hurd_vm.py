@@ -253,6 +253,43 @@ def prepare_ci_image(src, fresh=False):
         os.unlink(part)
         sys.exit("[vm] FAIL: the grub.cfg patch did not land in the "
                  "image\n" + r.stdout[-2000:])
+
+    # The driver logs in as root with no password: that is its CI
+    # contract.  The older preinstalled images shipped an empty
+    # root password, the newer ones do not - so the CI COPY (never
+    # the source) gets root's password hash cleared in /etc/shadow,
+    # exactly like the grub.cfg patch above.  Idempotent, verified
+    # after the write; a copy without /etc/shadow (none known)
+    # keeps whatever login policy it has.
+    shadow_path = part + ".shadow"
+    subprocess.run([debugfs, "-R", "dump /etc/shadow " + shadow_path,
+                    part], check=True, capture_output=True)
+    with open(shadow_path) as f:
+        shadow = f.read()
+    new_shadow, n = re.subn(r"(?m)^root:[^:]*:", "root::", shadow, 1)
+    if n == 1 and new_shadow != shadow:
+        with open(shadow_path, "w") as f:
+            f.write(new_shadow)
+        cmds = part + ".shadow.cmds"
+        with open(cmds, "w") as f:
+            f.write("cd /etc\n"
+                    "rm shadow\n"
+                    f"write {shadow_path} shadow\n")
+        subprocess.run([debugfs, "-w", "-f", cmds, part],
+                       check=True, capture_output=True)
+        r = subprocess.run([debugfs, "-R", "cat /etc/shadow", part],
+                           capture_output=True, text=True)
+        if re.search(r"(?m)^root::", r.stdout):
+            print("[vm] root password cleared on the CI copy")
+        else:
+            os.unlink(part)
+            sys.exit("[vm] FAIL: the /etc/shadow patch did not land "
+                     "in the image\n" + r.stdout[-2000:])
+        os.unlink(cmds)
+    else:
+        print("[vm] root password already empty on the CI copy")
+    os.unlink(shadow_path)
+
     subprocess.run(["dd", f"if={part}", f"of={CI_IMAGE}",
                     "bs=512", f"seek={lba}", "conv=notrunc",
                     "status=none"], check=True)
