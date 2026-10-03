@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Claire Ivanenka <claire@gnu-ai.org>
+
+# run artifacts
+serial.log
+qemu.log
+driver-run.log
+__pycache__/
+
+# prepared disk images
+*.img
+*.img.part
+*.img.ready
+*.part
+copy-*.img
