@@ -145,9 +145,31 @@ class SerialVM:
                             accel = "-accel tcg"
                             errf.close()
                             return self.start()
+                        if "Failed to get" in reason and "lock" in reason:
+                            # The image is already used by another QEMU
+                            # (typically a running interactive session,
+                            # which holds an exclusive write lock - even
+                            # a read-only overlay would be refused).
+                            # Retry on a private sparse copy of the image,
+                            # leaving the other VM untouched.
+                            errf.close()
+                            return self._retry_with_copy()
                         raise RuntimeError("QEMU exited early:\n" + reason)
                     time.sleep(0.5)
             raise RuntimeError("serial port never came up:\n" + self._qemu_tail())
+
+    def _retry_with_copy(self):
+        copy = os.path.abspath(
+            "copy-" + str(os.getpid()) + ".img")
+        print(f"[vm] image is locked by another QEMU; "
+              f"booting a private sparse copy: {copy}")
+        # plain cp bypasses QEMU's image locking entirely (qemu-img
+        # and overlays would take a lock the running VM refuses)
+        subprocess.run(
+            ["cp", "--sparse=always", os.path.abspath(self.disk), copy],
+            check=True)
+        self.disk = copy
+        return self.start()
 
     def _qemu_tail(self) -> str:
         try:
