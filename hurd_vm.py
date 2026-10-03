@@ -21,6 +21,8 @@ headless, scriptable machine:
 Usage:
     hurd_vm.py <image>                  # boot to a login prompt
     hurd_vm.py <image> <script.sh>      # boot, then run the script
+    add --copy to force a private copy of the image when a virtual
+    machine is already running it
 
 The script runs as root inside the guest; its stdout/stderr arrive
 on the serial line (captured in serial.log and echoed here).  The
@@ -89,14 +91,74 @@ def build_boot_iso(workdir: str) -> str:
     return iso
 
 
+# ------------------------------------------------------------------
+# A virtual machine is already running with the image?
+
+
+def find_running_vms(image: str):
+    """Return the PIDs of the QEMU processes holding IMAGE open.
+
+    Implemented by scanning /proc/*/fd (no external tools, works for
+    the processes of the current user).
+    """
+    image = os.path.abspath(image)
+    pids = []
+    try:
+        proc = os.listdir("/proc")
+    except OSError:
+        return pids
+    for pid in proc:
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                comm = f.read().strip()
+            if "qemu" not in comm:
+                continue
+            for fd in os.listdir(f"/proc/{pid}/fd"):
+                try:
+                    target = os.readlink(f"/proc/{pid}/fd/{fd}")
+                except OSError:
+                    continue
+                if target == image:
+                    pids.append(int(pid))
+                    break
+        except OSError:
+            continue
+    return sorted(pids)
+
+
+def check_vm_already_running(image: str, allow_copy: bool) -> bool:
+    """Abort cleanly when another QEMU already runs the image.
+
+    Returns True when the caller must proceed on a private copy.
+    """
+    pids = find_running_vms(image)
+    if not pids:
+        return False
+    msg = ("[vm] virtual machine already running: "
+           + ", ".join(f"pid {p}" for p in pids)
+           + f" is using {image}")
+    if allow_copy:
+        print(msg)
+        print("[vm] --copy given: booting a private copy "
+              "(beware: the source is live, the copy may be torn)")
+        return True
+    print(msg)
+    print("[vm] close it first, or pass --copy to force a private copy")
+    sys.exit(2)
+
+
 class SerialVM:
-    """QEMU with the serial line on a local Telnet socket.
+    """QEMU with the serial line on a local TCP socket (raw bytes,
+    not Telnet: the telnet chardev's IAC negotiation proved flaky).
 
     QEMU's stderr is captured in qemu.log and echoed whenever the
     process dies - never swallow the reason again.
     """
 
-    def __init__(self, iso: str, disk: str, memory: str = "2G"):
+    def __init__(self, iso: str, disk: str, memory: str = "2G",
+                 allow_copy: bool = False):
         # pick a free ephemeral port: no conflict with a lingering VM
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
@@ -108,6 +170,7 @@ class SerialVM:
         self.proc = None
         self.log = b""
         self.sock = None
+        self.allow_copy = allow_copy
         self.stderr_path = os.path.abspath("qemu.log")
 
     def _base_cmd(self, accel):
@@ -117,7 +180,7 @@ class SerialVM:
             "-drive", f"file={self.disk},cache=writeback",
             "-net", "user", "-net", "nic,model=e1000",
             "-display", "none",
-            "-serial", f"telnet:127.0.0.1:{self.port},server,nowait",
+            "-serial", f"tcp:127.0.0.1:{self.port},server,nowait",
         ]
 
     def start(self):
@@ -132,8 +195,6 @@ class SerialVM:
                     self.sock = socket.create_connection(
                         ("127.0.0.1", self.port), timeout=5)
                     self.sock.settimeout(5)
-                    # refuse the Telnet option negotiations QEMU proposes
-                    self.sock.sendall(b"\xff\xfc\x01\xff\xfc\x03\xff\xfe\x00")
                     return
                 except OSError:
                     if self.proc.poll() is not None:
@@ -145,7 +206,8 @@ class SerialVM:
                             accel = "-accel tcg"
                             errf.close()
                             return self.start()
-                        if "Failed to get" in reason and "lock" in reason:
+                        if "Failed to get" in reason and "lock" in reason \
+                                and self.allow_copy:
                             # The image is already used by another QEMU
                             # (typically a running interactive session,
                             # which holds an exclusive write lock - even
@@ -154,6 +216,14 @@ class SerialVM:
                             # leaving the other VM untouched.
                             errf.close()
                             return self._retry_with_copy()
+                        if "Failed to get" in reason and "lock" in reason:
+                            pids = find_running_vms(self.disk)
+                            raise RuntimeError(
+                                "virtual machine already running: "
+                                + (", ".join(f"pid {p}" for p in pids)
+                                   if pids else "unknown pid")
+                                + " is using " + self.disk
+                                + "; close it first or pass --copy")
                         raise RuntimeError("QEMU exited early:\n" + reason)
                     time.sleep(0.5)
             raise RuntimeError("serial port never came up:\n" + self._qemu_tail())
@@ -164,7 +234,11 @@ class SerialVM:
         print(f"[vm] image is locked by another QEMU; "
               f"booting a private sparse copy: {copy}")
         # plain cp bypasses QEMU's image locking entirely (qemu-img
-        # and overlays would take a lock the running VM refuses)
+        # and overlays would take a lock the running VM refuses).
+        # NOTE: the source is being written by the running VM, so the
+        # copy may be slightly torn; close the other VM and remove
+        # the copy for a pristine one if the guest misbehaves.
+        print("[vm] note: the source is live; the copy may be torn")
         subprocess.run(
             ["cp", "--sparse=always", os.path.abspath(self.disk), copy],
             check=True)
@@ -217,17 +291,42 @@ class SerialVM:
 
 
 def main():
-    if len(sys.argv) < 2:
+    args = [a for a in sys.argv[1:] if a != "--copy"]
+    allow_copy = len(args) != len(sys.argv) - 1
+    if not args:
         print(__doc__)
         return 2
-    disk = sys.argv[1]
-    script = sys.argv[2] if len(sys.argv) > 2 else None
+    disk = args[0]
+    script = args[1] if len(args) > 1 else None
+    try:
+        return run(disk, script, allow_copy)
+    except Exception as e:
+        print(f"[vm] {e}")
+        try:
+            with open("serial.log", "rb") as f:
+                tail = f.read()[-3000:]
+            print("---- serial console (tail) ----")
+            print(tail.decode("latin-1", "replace"))
+        except OSError:
+            pass
+        return 1
+
+
+def run(disk, script, allow_copy=False):
 
     if not os.path.isfile(disk):
         print(f"[vm] FAIL: no such image: {disk}")
         return 2
+    if check_vm_already_running(disk, allow_copy):
+        # a VM is already running with the image: boot a private copy
+        import shutil
+        copy = os.path.abspath("copy-" + str(os.getpid()) + ".img")
+        print(f"[vm] copying the image (may be torn: the source is live)")
+        shutil.copyfile(disk, copy)
+        print(f"[vm] private copy: {copy}")
+        disk = copy
     iso = build_boot_iso(os.getcwd())
-    vm = SerialVM(iso, disk)
+    vm = SerialVM(iso, disk, allow_copy=allow_copy)
     vm.start()
     rc = 1
     logf = open("serial.log", "wb")
