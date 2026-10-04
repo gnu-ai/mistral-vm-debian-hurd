@@ -266,7 +266,8 @@ def prepare_ci_image(src, fresh=False):
                     part], check=True, capture_output=True)
     with open(shadow_path) as f:
         shadow = f.read()
-    new_shadow, n = re.subn(r"(?m)^root:[^:]*:", "root::", shadow, 1)
+    new_shadow, n = re.subn(r"(?m)^root:[^:]*:", "root::", shadow,
+                           count=1)
     if n == 1 and new_shadow != shadow:
         with open(shadow_path, "w") as f:
             f.write(new_shadow)

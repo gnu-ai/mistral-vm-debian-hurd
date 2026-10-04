@@ -13,3 +13,7 @@ __pycache__/
 *.img.ready
 *.part
 copy-*.img
+
+# Local CI validation artifacts (served trees, run logs)
+/ci-*.log
+/serve/
