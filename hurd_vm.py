@@ -331,7 +331,10 @@ class SerialVM:
         # two concurrent VMs cannot share it (HURD_VM_SSH_PORT).
         ssh_port = os.environ.get("HURD_VM_SSH_PORT", "2222")
         return [
-            "qemu-system-x86_64", accel, "-m", self.memory, "-no-reboot",
+            "qemu-system-x86_64", accel, "-m", self.memory,
+            # Two vCPUs: the guests compile (the Hurd, Mach) and a
+            # single core makes every build painfully slow.
+            "-smp", "2", "-no-reboot",
             "-drive", f"file={self.disk},cache=writeback",
             "-net", f"user,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
             "-net", "nic,model=e1000",
@@ -490,10 +493,27 @@ def run(src, script, opts):
                 body = f.read()
             vm.log = b""
             # Feed the script through a heredoc, then run it.
-            vm.send("cat > /tmp/guest.sh <<'GUESTEOF'")
-            for line in body.splitlines():
+            #
+            # The serial line has no flow control: lines sent
+            # back-to-back overflow the guest tty buffer and the
+            # heredoc silently loses bytes (the shell then never
+            # sees its GUESTEOF terminator).  Each line is
+            # therefore paced by its own echo: we wait until the
+            # guest has echoed it back before sending the next.
+            def send_paced(line):
+                before = len(vm.log)
                 vm.send(line)
-            vm.send("GUESTEOF")
+                needle = line.strip().encode("utf-8", "replace")[-40:]
+                deadline = time.time() + 15
+                while (needle and time.time() < deadline
+                       and needle not in vm.log[before:]):
+                    vm.read_some(1)
+                time.sleep(0.05)
+
+            send_paced("cat > /tmp/guest.sh <<'GUESTEOF'")
+            for line in body.splitlines():
+                send_paced(line)
+            send_paced("GUESTEOF")
             vm.send("sh /tmp/guest.sh; echo GUESTRC=$?")
             if not vm.wait_for(r"GUESTRC=(\d+)", TIMEOUT_SCRIPT):
                 print("[vm] FAIL: the guest script did not complete")
